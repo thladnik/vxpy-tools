@@ -1,0 +1,6 @@
+Y_MIRROR_SIGNAL: str = 'y_mirror_in'
+VAR_DISPLAY_PARAMS_PREFIX: str = 'var_param'
+TIME_POSTFIX: str = '_attr_time'
+IO_FILENAME: str = 'Io.hdf5'
+DISPLAY_FILENAME: str = 'Display.hdf5'
+DEBUG_FOLDER: str = 'debug'
