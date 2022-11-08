@@ -10,7 +10,7 @@ import scipy.signal
 import scipy.interpolate
 from matplotlib import pyplot as plt
 
-import config
+from vxtools.summarize import config
 
 log = logging.getLogger(__name__)
 

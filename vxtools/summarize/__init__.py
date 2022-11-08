@@ -2,7 +2,7 @@ import logging
 
 import h5py
 
-import data_digest
+from vxtools.summarize import data_digest
 
 log = logging.getLogger(__name__)
 
