@@ -22,5 +22,5 @@ if __name__ == '__main__':
 
     if directive.lower() == 'summarize':
 
-        import summarize
+        from vxtools import summarize
         summarize.run(*args)
