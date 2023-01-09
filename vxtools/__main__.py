@@ -2,15 +2,9 @@ import logging
 import sys
 
 
-root = logging.getLogger()
-root.setLevel(logging.INFO)
-handler = logging.StreamHandler(sys.stdout)
-handler.setLevel(logging.DEBUG)
-formatter = logging.Formatter('%(name)-40s : %(levelname)-10s : %(message)s')
-handler.setFormatter(formatter)
-root.addHandler(handler)
-
-log = logging.getLogger(__name__)
+# Set up logging
+from vxtools.logger import setup_logging
+setup_logging()
 
 
 if __name__ == '__main__':
@@ -23,4 +17,4 @@ if __name__ == '__main__':
     if directive.lower() == 'summarize':
 
         from vxtools import summarize
-        summarize.run(*args)
+        summarize.create_summary(*args)

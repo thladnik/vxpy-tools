@@ -11,8 +11,20 @@ import scipy.interpolate
 from matplotlib import pyplot as plt
 
 from vxtools.summarize import config
+from vxtools.summarize.structure import OPENMODE, open_summary
 
 log = logging.getLogger(__name__)
+
+
+def create_summary(folder_path: str, file_name: str = 'vxtools_summary.hdf5'):
+
+    # Combine paths
+    full_path = f'{folder_path}{file_name}'
+
+    log.info(f'Create summary of all recordings in {folder_path} in file {file_name}')
+    # Open file in create mode and digest all valid folders in base directory
+    with open_summary(full_path, mode=OPENMODE.CREATE) as f:
+        digest_folder(folder_path, f)
 
 
 def unravel_dict(dict_data: dict, group: h5py.Group):
@@ -34,9 +46,9 @@ def unravel_dict(dict_data: dict, group: h5py.Group):
                 continue
 
             group.attrs[key] = item
-        except:
-            print('Failed for:')
-            print(key, item, type(item))
+
+        except Exception as _:
+            log.error(f'Failed to unpack data for key {key}, item {item}, type {type(item)}')
 
 
 def calculate_ca_frame_times(mirror_position: np.ndarray, mirror_time: np.ndarray):
@@ -153,8 +165,8 @@ def digest_folder(root_path: str, out_file: h5py.File):
         # Import individual stat dicts into pandas DataFrame for easier handling
         stat_df = pd.DataFrame.from_records(roi_stats)
         # Sort in into scalar and object columns (anything non-scalar in pandas, is stored as generic object)
-        scalar_cols = [col_name for col_name, series in stat_df.iteritems() if series.dtype != object]
-        object_cols = [col_name for col_name, series in stat_df.iteritems() if series.dtype == object]
+        scalar_cols = [col_name for col_name, series in stat_df.items() if series.dtype != object]
+        object_cols = [col_name for col_name, series in stat_df.items() if series.dtype == object]
 
         # Create datasets for scalar values (scalar stat values are stored in a dataset of shape (roi num, )
         for col_name in scalar_cols:
@@ -227,9 +239,14 @@ def digest_folder(root_path: str, out_file: h5py.File):
         roi_ref_dataset.resize((roi_ref_dataset.shape[0] + new_roi_num, roi_ref_dataset.shape[1]))
         roi_ref_dataset[-new_roi_num:] = new_roi_refs
 
+        # Save data for all display phases
         log.info('Include display data')
         with h5py.File(os.path.join(current_path, config.DISPLAY_FILENAME), 'r') as disp_file:
             disp_data_group = rec_group.create_group('display_data')
+
+            # Get smallest phase_id
+            smallest_phase_id = min([int(grp.name.replace('/phase', '')) for grp in disp_file.values()
+                                     if isinstance(grp, h5py.Group) and grp.name.startswith('/phase')])
 
             log.info('Add display phase data')
             disp_phase_group = disp_data_group.require_group('phases')
@@ -238,7 +255,14 @@ def digest_folder(root_path: str, out_file: h5py.File):
                 if not isinstance(grp, h5py.Group) or not grp.name.startswith('/phase'):
                     continue
 
-                phase_grp = disp_phase_group.create_group(grp.name.replace('/phase', ''))
+                # Save phase_id, for further ease of processing phase_id is set to start at 0
+                #  (original phase ID is kept for reference to original)
+                phase_id = int(grp.name.replace('/phase', ''))
+                phase_grp = disp_phase_group.create_group(str(phase_id - smallest_phase_id))
+                phase_grp.attrs.update({'__original_phase_id': phase_id})
+                phase_grp.attrs.update({'__phase_id': phase_id - smallest_phase_id})
+
+                # Add display phase group attributes
                 phase_grp.attrs.update(grp.attrs)
 
 

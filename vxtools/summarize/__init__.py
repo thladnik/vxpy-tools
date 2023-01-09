@@ -1,13 +1,17 @@
-import logging
-
-import h5py
-
-from vxtools.summarize import data_digest
-
-log = logging.getLogger(__name__)
+# Import modules
+from vxtools.summarize.data_digest import create_summary
+from vxtools.summarize.structure import Summary, Recording, Roi, OPENMODE, open_summary
 
 
-def run(path):
-    log.info(f'Create summary of all recordings in {path}')
-    with h5py.File(f'{path}Summary.hdf5', 'w') as h5f:
-        data_digest.digest_folder(path, h5f)
+# Set up logging
+from vxtools.logger import setup_logging
+setup_logging()
+
+
+# Define quick-access functions
+def open_summary_for_inspection(path: str) -> Summary:
+    return Summary(path, mode=OPENMODE.INSPECT)
+
+
+def open_summary_for_analysis(path: str) -> Summary:
+    return Summary(path, mode=OPENMODE.ANALYZE)
