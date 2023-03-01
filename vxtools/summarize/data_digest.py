@@ -182,8 +182,21 @@ def digest_folder(root_path: str, out_file: h5py.File):
         with h5py.File(os.path.join(current_path, config.IO_FILENAME), 'r') as io_file:
             log.info('Calculate frame timing of signal')
             downsample_by = 50  # TODO: TEMP
-            mirror_position = np.squeeze(io_file[config.Y_MIRROR_SIGNAL])[::downsample_by]
-            mirror_time = np.squeeze(io_file[f'{config.Y_MIRROR_SIGNAL}{config.TIME_POSTFIX}'])[::downsample_by]
+            try:
+                mirror_position = np.squeeze(io_file[config.Y_MIRROR_SIGNAL])[::downsample_by]
+            except:
+                # New version of vxpy has channel type prefix
+                try:
+                    mirror_position = np.squeeze(io_file[f'ai_{config.Y_MIRROR_SIGNAL}'])[::downsample_by]
+                except:
+                    raise KeyError('Mirror signal key is not in io data file')
+            try:
+                mirror_time = np.squeeze(io_file[f'{config.Y_MIRROR_SIGNAL}{config.TIME_POSTFIX}'])[::downsample_by]
+            except:
+                try:
+                    mirror_time = np.squeeze(io_file[f'ai_{config.Y_MIRROR_SIGNAL}_time'])[::downsample_by]
+                except:
+                    raise KeyError('Mirror signal time key is not in io data file')
 
             # Calculate frame timing
             frame_idcs, frame_times = calculate_ca_frame_times(mirror_position, mirror_time)
@@ -192,8 +205,17 @@ def digest_folder(root_path: str, out_file: h5py.File):
             plot_y_mirror_debug_info(mirror_position, mirror_time, frame_idcs, current_path)
 
             log.info('Calculate interpolation for signal\'s record group IDs')
-            record_group_ids = io_file['record_group_id'][::downsample_by].squeeze()
-            record_group_ids_time = io_file['global_time'][::downsample_by].squeeze()
+            try:
+                record_group_ids = io_file['record_group_id'][::downsample_by].squeeze()
+                record_group_ids_time = io_file['global_time'][::downsample_by].squeeze()
+            except:
+                try:
+                    # New version of vxpy has double leading underscores for system side attributes
+                    record_group_ids = io_file['__record_group_id'][::downsample_by].squeeze()
+                    record_group_ids_time = io_file['__time'][::downsample_by].squeeze()
+                except:
+                    raise KeyError('Record group ID and/or global time not in io file')
+
             ca_rec_group_id_fun = scipy.interpolate.interp1d(record_group_ids_time, record_group_ids, kind='nearest')
 
         # Check if frame times and signal match
@@ -263,7 +285,23 @@ def digest_folder(root_path: str, out_file: h5py.File):
                 phase_grp.attrs.update({'__phase_id': phase_id - smallest_phase_id})
 
                 # Add display phase group attributes
-                phase_grp.attrs.update(grp.attrs)
+                # phase_grp.attrs.update(grp.attrs)  # This would be simpler, but can cause issues
+                # We need to go through all attributes individually
+                #  and fix 0-dimension np.ndarrays,
+                #  otherwise they may cause problems during pandas analysis
+                for attr_name in grp.attrs:
+                    attr = grp.attrs[attr_name]
+                    # Remove extra dimensions
+                    if isinstance(attr, np.ndarray):
+                        attr = attr.squeeze()
+                        # Convert
+                        if attr.shape == ():
+                            attr = float(attr)
+
+                    # Write to output dictionary
+                    phase_grp.attrs[attr_name] = attr
+
+
 
 
 if __name__ == '__main__':

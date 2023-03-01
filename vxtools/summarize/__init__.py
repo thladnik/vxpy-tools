@@ -12,6 +12,9 @@ setup_logging()
 def open_summary_for_inspection(path: str) -> Summary:
     return Summary(path, mode=OPENMODE.INSPECT)
 
+def open_summary_for_direct_access(path: str) -> Summary:
+    return Summary(path, mode=OPENMODE.EDIT_ON_DISK)
+
 
 def open_summary_for_analysis(path: str) -> Summary:
     return Summary(path, mode=OPENMODE.ANALYZE)

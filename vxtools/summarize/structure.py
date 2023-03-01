@@ -15,6 +15,7 @@ class OPENMODE(Enum):
     CREATE = 1
     INSPECT = 2
     ANALYZE = 3
+    EDIT_ON_DISK = 4
 
 
 def open_summary(file_path: str, mode: OPENMODE = OPENMODE.INSPECT) -> Union[h5py.File, None]:
@@ -27,6 +28,8 @@ def open_summary(file_path: str, mode: OPENMODE = OPENMODE.INSPECT) -> Union[h5p
         fmode = 'r'
     elif mode == OPENMODE.ANALYZE:
         fdriver = 'core'  # core driver profile will load whole dataset into memory for faster access
+        fmode = 'r+'
+    elif mode == OPENMODE.EDIT_ON_DISK:
         fmode = 'r+'
 
     log.info(f'Open HDF5 file {file_path} ({fmode=}, {fdriver=})')
@@ -78,7 +81,7 @@ class Summary:
                 and (rec_id is None or rec_id == roi.rec_id)
                 and (roi_id is None or roi_id == roi.roi_id)]
 
-    def add_data(self, name: str, data: np.numeric) -> None:
+    def add_data(self, name: str, data: np.numeric, overwrite=False) -> None:
 
         # Get custom user data group
         grp = self.h5file['/'].require_group('user_data')
@@ -125,10 +128,6 @@ class Recording:
         self.summary: Summary = summary_file
         self.h5group: h5py.Group = self.summary.h5file['recording'][rec_folder]
 
-        # Dict which may contain a regressor for each simple parameter
-        self._simple_regressors: Dict[str, np.ndarray] = {}
-        # List of the start and end indices within the calcium recording
-        self._simple_phase_index_intervals: List[Tuple[int, int]]
         # Dataframe containing all phase information
         self._phase_df: pd.DataFrame() = None
 
@@ -144,31 +143,67 @@ class Recording:
         return self.h5group['ca_data']['frame_times'][:]
 
     @property
-    def image_dimensions(self) -> Tuple[int, int]:
-        return self.h5group['s2p_ops']['meanImg'].shape
+    def rec_depth(self):
+        depth_str = self.h5group.attrs['rec_depth']
+        sign = -1 if depth_str.startswith('n') else +1
+        val = int(depth_str.replace('n', '').replace('p', ''))
+        return sign * val
 
-    def dff(self, roi_id: int):
+    @property
+    def image_dimensions(self) -> Tuple[int, int]:
+        return self.ops['meanImg'].shape
+
+    @property
+    def ops(self) -> h5py.Group:
+        return self.h5group['s2p_ops']
+    
+    def dff(self, roi_id: int) -> np.ndarray:
         return self.h5group['ca_data']['dff'][roi_id]
 
-    def signal(self, roi_id: int):
+    def signal(self, roi_id: int) -> np.ndarray:
         return self.h5group['ca_data']['signal'][roi_id]
 
-    def signal_devonc(self, roi_id: int):
+    def signal_devonc(self, roi_id: int) -> np.ndarray:
         return self.h5group['ca_data']['signal_deconv'][roi_id]
 
-    def zscore(self, roi_id: int):
+    def zscore(self, roi_id: int) -> np.ndarray:
         return self.h5group['ca_data']['zscore'][roi_id]
+    
 
-    def roi_stats(self, roi_id: int):
+    def roi_stats(self, roi_id: int) -> h5py.Group:
         return self.h5group['s2p_roi_stats'][str(roi_id)]
+
 
     def _create_display_phase_dataframe(self):
         rows = []
         for phase in self.h5group['display_data']['phases'].values():
-            start_index = np.argmin(np.abs(self.ca_times - phase.attrs['start_time']))
-            end_index = np.argmin(np.abs(self.ca_times - phase.attrs['end_time']))
+            try:
+                start_index = np.argmin(np.abs(self.ca_times - phase.attrs['start_time']))
+                end_index = np.argmin(np.abs(self.ca_times - phase.attrs['end_time']))
+            except:
+
+                start_index = np.argmin(np.abs(self.ca_times - phase.attrs['__start_time']))
+                end_index = np.argmin(np.abs(self.ca_times - phase.attrs['__target_end_time']))
 
             phase_data = {'ca_start_index': start_index, 'ca_end_index': end_index}
+
+            # Fallback, if 0-dim np.ndarrays are in the mix...
+            #  even 0-dim np.ndarrays are considered objects in pd.DataFrames
+            #  and therefore make the affected DataFrame columns unhashable
+
+            # for attr_name in phase.attrs:
+                # attr = phase.attrs[attr_name]
+                # # Remove extra dimensions
+                # if isinstance(attr, np.ndarray):
+                #     attr = attr.squeeze()
+                #     # Convert
+                #     if attr.shape == ():
+                #         attr = float(attr)
+                #
+                # # Write to output dictionary
+                # phase_data[attr_name] = attr
+
+            # Add all group attributes to phase_data
             phase_data.update(phase.attrs)
 
             rows.append(phase_data)
@@ -256,7 +291,7 @@ class Roi:
 
     @property
     def shortname(self):
-        return f'Roi({self.date=}, {self.fish_id}, {self.rec_id}, {self.roi_id})'
+        return f'Roi({self.date}, {self.fish_id}, {self.rec_id}, {self.roi_id})'
 
     @property
     def rec(self):
