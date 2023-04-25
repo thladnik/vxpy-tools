@@ -135,6 +135,18 @@ class Recording:
         return f'{self.__class__.__name__}(date={self.date}, fish_id={self.fish_id}, rec_id={self.rec_id})'
 
     @property
+    def rois(self) -> List[Roi]:
+        return self.summary.rois(date=self.date, fish_id=self.fish_id, rec_id=self.rec_id)
+
+    def meta(self, name: str) -> Any:
+        if name in self.h5group['meta']:
+            return self.h5group['meta'][name]
+        elif name in self.h5group['meta'].attrs:
+            return self.h5group['meta'].attrs[name]
+        else:
+            raise KeyError(f'Metadata key {name} not in recording')
+
+    @property
     def record_group_id(self):
         return self.h5group['ca_data']['record_group_ids'][:]
 
@@ -168,11 +180,9 @@ class Recording:
 
     def zscore(self, roi_id: int) -> np.ndarray:
         return self.h5group['ca_data']['zscore'][roi_id]
-    
 
     def roi_stats(self, roi_id: int) -> h5py.Group:
         return self.h5group['s2p_roi_stats'][str(roi_id)]
-
 
     def _create_display_phase_dataframe(self):
         rows = []

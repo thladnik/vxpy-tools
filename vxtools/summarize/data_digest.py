@@ -1,6 +1,9 @@
 import datetime
+import hashlib
 import logging
 import os
+from typing import Any, Dict
+import yaml
 
 import h5py
 import numpy as np
@@ -8,6 +11,8 @@ import pandas as pd
 import scipy.stats
 import scipy.signal
 import scipy.interpolate
+import tifffile
+from tqdm import tqdm
 from matplotlib import pyplot as plt
 
 from vxtools.summarize import config
@@ -24,6 +29,7 @@ def create_summary(folder_path: str, file_name: str = 'vxtools_summary.hdf5'):
     log.info(f'Create summary of all recordings in {folder_path} in file {file_name}')
     # Open file in create mode and digest all valid folders in base directory
     with open_summary(full_path, mode=OPENMODE.CREATE) as f:
+        f.attrs['root_path'] = folder_path
         digest_folder(folder_path, f)
 
 
@@ -50,6 +56,36 @@ def unravel_dict(dict_data: dict, group: h5py.Group):
         except Exception as _:
             log.error(f'Failed to unpack data for key {key}, item {item}, type {type(item)}')
 
+
+def load_metadata(folder_path: str) -> Dict[str, Any]:
+    """Function searches for and returns metadata on a given folder path
+
+    Function scans the `folder_path` for metadata yaml files (ending in `meta.yaml`)
+    and returns a dictionary containing their contents
+    """
+
+    meta_files = [f for f in os.listdir(folder_path) if f.endswith('meta.yaml')]
+
+    log.info(f'Found {len(meta_files)} metadata files in {folder_path}.')
+
+    meta_data = {}
+    for f in meta_files:
+        with open(os.path.join(folder_path, f), 'r') as stream:
+            try:
+                meta_data.update(yaml.safe_load(stream))
+            except yaml.YAMLError as exc:
+                print(exc)
+
+    return meta_data
+
+def phase_correlation(ref: np.ndarray, im: np.ndarray):
+    """Function to calculate phase correlation between two 2D datasets"""
+    fft_ref = np.fft.fft2(ref)
+    fft_im = np.fft.fft2(im)
+    conj_b = np.ma.conjugate(fft_im)
+    r = fft_ref*conj_b
+    r /= np.absolute(r)
+    return np.fft.ifft2(r).real
 
 def calculate_ca_frame_times(mirror_position: np.ndarray, mirror_time: np.ndarray):
 
@@ -101,6 +137,34 @@ def plot_y_mirror_debug_info(mirror_position: np.ndarray, mirror_time: np.ndarra
 def digest_folder(root_path: str, out_file: h5py.File):
 
     log.info(f'Digest {root_path}')
+
+    # Load zstack, if it exists
+    zstack = None
+    filenames = [f for f in os.listdir(root_path) if os.path.isfile(f'{root_path}{f}')]
+    zstack_filenames = [f for f in filenames if 'zstack' in f]
+    if len(zstack_filenames) > 0:
+
+        if len(zstack_filenames) > 1:
+            log.warning(f'Multiple zstack files found. Using first one.')
+
+        # Load ZStack
+        log.info(f'Load zstack from file {zstack_filenames[0]}')
+        zstack = tifffile.imread(f'{root_path}{zstack_filenames[0]}')
+    else:
+        log.warning(f'No zstack found for root path {root_path}')
+
+    # Load metadata
+    root_meta = load_metadata(root_path)
+
+    # Create root group and add data
+    root_hash = hashlib.md5(root_path.encode()).hexdigest()
+    root_group = out_file.require_group('folder_roots').require_group(root_hash)
+    root_group.attrs['folder_path'] = root_path
+    root_group.require_group('meta').attrs.update(root_meta)
+    if zstack is not None:
+        root_group.create_dataset('zstack', data=zstack)
+
+    log.info('Go through potential recording subfolders')
     for rec_folder in os.listdir(root_path):
         current_path = f'{root_path}{rec_folder}/'
 
@@ -109,13 +173,14 @@ def digest_folder(root_path: str, out_file: h5py.File):
 
         log.info(f'Search {current_path}')
 
+        # Look for suite2p folder
         missing = []
         if not 'suite2p' in os.listdir(current_path):
             log.warning(f'No suite2p folder found in {current_path}')
             missing.append('suite2p')
 
+        # Try next level if there's no imaging data here
         if len(missing) > 0:
-            # Try next level
             digest_folder(current_path, out_file)
             continue
 
@@ -128,6 +193,13 @@ def digest_folder(root_path: str, out_file: h5py.File):
 
         # Create group
         rec_group = out_file.require_group('recording').require_group(rec_folder)
+
+        # Add hash of root_folder group for reference
+        rec_group.attrs['folder_root_hash'] = root_hash
+
+        # Add manually added metadata
+        rec_meta = load_metadata(current_path)
+        rec_group.require_group('meta').attrs.update({**root_meta, **rec_meta})
 
         # Expected recording folder format "YYYY-mm-dd_fishX_recY_nZ/pZ"
         rec_props = rec_folder.split('_')
@@ -142,6 +214,8 @@ def digest_folder(root_path: str, out_file: h5py.File):
         rec_group.attrs['rec_id'] = rec_id
         rec_group.attrs['rec_id'] = rec_id
         rec_group.attrs['rec_depth'] = rec_depth
+        # Set relative path from summary file's root directory
+        rec_group.attrs['rel_path'] = os.path.relpath(current_path, out_file.attrs['root_path'])
 
         # Load s2p processed data
         s2p_path = f'{current_path}suite2p/plane0/'
@@ -181,20 +255,19 @@ def digest_folder(root_path: str, out_file: h5py.File):
         # Use Y mirror information to calculate frame timing relative to visual stimulus/behavior/etc
         with h5py.File(os.path.join(current_path, config.IO_FILENAME), 'r') as io_file:
             log.info('Calculate frame timing of signal')
-            downsample_by = 50  # TODO: TEMP
             try:
-                mirror_position = np.squeeze(io_file[config.Y_MIRROR_SIGNAL])[::downsample_by]
+                mirror_position = np.squeeze(io_file[config.Y_MIRROR_SIGNAL])[:]
             except:
                 # New version of vxpy has channel type prefix
                 try:
-                    mirror_position = np.squeeze(io_file[f'ai_{config.Y_MIRROR_SIGNAL}'])[::downsample_by]
+                    mirror_position = np.squeeze(io_file[f'ai_{config.Y_MIRROR_SIGNAL}'])[:]
                 except:
                     raise KeyError('Mirror signal key is not in io data file')
             try:
-                mirror_time = np.squeeze(io_file[f'{config.Y_MIRROR_SIGNAL}{config.TIME_POSTFIX}'])[::downsample_by]
+                mirror_time = np.squeeze(io_file[f'{config.Y_MIRROR_SIGNAL}{config.TIME_POSTFIX}'])[:]
             except:
                 try:
-                    mirror_time = np.squeeze(io_file[f'ai_{config.Y_MIRROR_SIGNAL}_time'])[::downsample_by]
+                    mirror_time = np.squeeze(io_file[f'ai_{config.Y_MIRROR_SIGNAL}_time'])[:]
                 except:
                     raise KeyError('Mirror signal time key is not in io data file')
 
@@ -206,13 +279,13 @@ def digest_folder(root_path: str, out_file: h5py.File):
 
             log.info('Calculate interpolation for signal\'s record group IDs')
             try:
-                record_group_ids = io_file['record_group_id'][::downsample_by].squeeze()
-                record_group_ids_time = io_file['global_time'][::downsample_by].squeeze()
+                record_group_ids = io_file['record_group_id'][:].squeeze()
+                record_group_ids_time = io_file['global_time'][:].squeeze()
             except:
                 try:
                     # New version of vxpy has double leading underscores for system side attributes
-                    record_group_ids = io_file['__record_group_id'][::downsample_by].squeeze()
-                    record_group_ids_time = io_file['__time'][::downsample_by].squeeze()
+                    record_group_ids = io_file['__record_group_id'][:].squeeze()
+                    record_group_ids_time = io_file['__time'][:].squeeze()
                 except:
                     raise KeyError('Record group ID and/or global time not in io file')
 
@@ -285,7 +358,8 @@ def digest_folder(root_path: str, out_file: h5py.File):
                 phase_grp.attrs.update({'__phase_id': phase_id - smallest_phase_id})
 
                 # Add display phase group attributes
-                # phase_grp.attrs.update(grp.attrs)  # This would be simpler, but can cause issues
+                # phase_grp.attrs.update(grp.attrs)
+                # This would be simpler, but can cause issues
                 # We need to go through all attributes individually
                 #  and fix 0-dimension np.ndarrays,
                 #  otherwise they may cause problems during pandas analysis
@@ -300,6 +374,56 @@ def digest_folder(root_path: str, out_file: h5py.File):
 
                     # Write to output dictionary
                     phase_grp.attrs[attr_name] = attr
+
+        log.info('Run zstack registration')
+        # Get mean
+        ref = ops_group['meanImg'][:]
+
+        # Determine padding and make sure it is divisible by 2
+        padding = ref.shape[0] / 4
+        padding = int(padding // 2 * 2)
+
+        # Pad reference on all sides
+        ref_im = np.pad(ref, (padding // 2, padding // 2))
+
+        # Calculate maximum correlations and pixel shifts
+        corrs = []
+        xy_shifts = []
+        for im in tqdm(zstack):
+
+            # Pad image
+            image = np.pad(im, (0, padding))
+
+            # Calculate phase correlation
+            corrimg = phase_correlation(ref_im, image)
+
+            # Get maximum phase correlation and corresponding x/y shifts
+            maxcorr = corrimg.max()
+            y, x = np.unravel_index(corrimg.argmax(), corrimg.shape)
+
+            # Subtract padding from shifts
+            x -= padding // 2
+            y -= padding // 2
+
+            # Add max correlation and corresponding shift
+            corrs.append(maxcorr)
+            xy_shifts.append([x, y])
+
+        # Convert
+        corrs = np.array(corrs)
+        xy_shifts = np.array(xy_shifts)
+
+        # Add registration
+        zstack_group = rec_group.require_group('zstack_registration')
+        # All results (debug)
+        zstack_group.create_dataset('max_correlations', data=corrs)
+        zstack_group.create_dataset('xyshifts', data=xy_shifts)
+        # Add most likely layer information for quick access
+        zlayer_index = corrs.argmax()
+        zstack_group.attrs['zlayer_index'] = zlayer_index
+        zstack_group.attrs['x_pixelshift'] = xy_shifts[zlayer_index, 0]
+        zstack_group.attrs['y_pixelshift'] = xy_shifts[zlayer_index, 1]
+        zstack_group.create_dataset('zlayer_image', data=zstack[zlayer_index])
 
 
 
